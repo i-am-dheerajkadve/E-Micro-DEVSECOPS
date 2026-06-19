@@ -1,0 +1,60 @@
+stages:
+  - build
+  - test
+  - scan
+  - docker
+  - deploy
+
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository"
+
+cache:
+  paths:
+    - .m2/repository
+    - .gradle/caches
+    - .gradle/wrapper
+
+build-maven:
+  stage: build
+  image: maven:3.8.6-openjdk-18
+  script:
+    - for service in api-gateway user-service order-service inventory-service; do cd $service && mvn compile && cd ..; done
+
+build-gradle:
+  stage: build
+  image: gradle:7.5.1-jdk17
+  script:
+    - for service in product-service cart-service payment-service notification-service; do cd $service && chmod +x gradlew && ./gradlew compileJava && cd ..; done
+
+test-maven:
+  stage: test
+  image: maven:3.8.6-openjdk-18
+  script:
+    - for service in api-gateway user-service order-service inventory-service; do cd $service && mvn test && cd ..; done
+
+test-gradle:
+  stage: test
+  image: gradle:7.5.1-jdk17
+  script:
+    - for service in product-service cart-service payment-service notification-service; do cd $service && chmod +x gradlew && ./gradlew test && cd ..; done
+
+security-scan:
+  stage: scan
+  image: maven:3.8.6-openjdk-18
+  script:
+    - echo "Running security scan / SonarQube / OWASP analysis..."
+
+docker-build:
+  stage: docker
+  image: docker:20.10.16
+  services:
+    - docker:20.10.16-dind
+  script:
+    - echo "Building and pushing docker images..."
+
+k8s-deploy:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  script:
+    - echo "Deploying to Kubernetes namespace ecommerce-devops..."
+    # - kubectl apply -f k8s/

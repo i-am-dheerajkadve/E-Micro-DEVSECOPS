@@ -1,0 +1,70 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      # Build & Test Maven Services
+      - name: Build and Test Maven Services
+        run: |
+          for service in api-gateway user-service order-service inventory-service; do
+            echo "Building Maven service: $service"
+            cd $service
+            mvn clean package -DskipTests=false
+            cd ..
+          done
+
+      # Build & Test Gradle Services
+      - name: Build and Test Gradle Services
+        run: |
+          for service in product-service cart-service payment-service notification-service; do
+            echo "Building Gradle service: $service"
+            cd $service
+            chmod +x gradlew
+            ./gradlew build -x test
+            ./gradlew test
+            cd ..
+          done
+
+      # Security Scanning Placeholder
+      - name: Run SonarQube Scan (Placeholder)
+        run: |
+          echo "Running SonarQube analysis..."
+          # mvn sonar:sonar or ./gradlew sonar
+
+      - name: OWASP Dependency Check (Placeholder)
+        run: |
+          echo "Running OWASP Dependency Check..."
+          # mvn dependency-check:check or ./gradlew dependencyCheckAnalyze
+
+      # Docker Image Build & Push (Mocked/Placeholder)
+      - name: Build Docker Images
+        run: |
+          services=("api-gateway" "user-service" "product-service" "cart-service" "order-service" "payment-service" "inventory-service" "notification-service" "frontend")
+          for service in "${services[@]}"; do
+            echo "Building Docker image for $service..."
+            # docker build -t my-registry/$service:latest ./$service
+          done
+
+      # Kubernetes Deployment (Mocked/Placeholder)
+      - name: Deploy to Kubernetes
+        run: |
+          echo "Deploying to Kubernetes namespace ecommerce-devops..."
+          # kubectl apply -f k8s/namespace.yml
+          # kubectl apply -f k8s/ -n ecommerce-devops
