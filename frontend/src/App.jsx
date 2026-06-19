@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 
 // API Gateway base URL.
 // This works for both local Docker Compose and EC2/public-IP access.
-const GATEWAY_URL = `${window.location.protocol}//${window.location.hostname}:8080`;
+const GATEWAY_URL = '';
 
 export default function App() {
   // Navigation & Page State
