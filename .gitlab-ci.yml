@@ -48,24 +48,69 @@ sonarqube_scan:
     -Dsonar.token=$SONAR_TOKEN
   allow_failure: true
 
-owasp_dependency_scan:
+owasp_findsecbugs:
   stage: owasp
   tags:
     - devsecops
   script:
-    - mkdir -p reports/owasp
-    - docker run --rm -v "$PWD:/src" -v "$PWD/reports/owasp:/report" owasp/dependency-check:latest
-      --project "E-Micro-DEVSECOPS"
-      --scan /src
-      --format HTML
-      --format JSON
-      --out /report
-      --disableYarnAudit
-      --disableNodeAudit
+    - mkdir -p reports/findsecbugs
+
+    # Security-only filter for SpotBugs/FindSecBugs
+    - |
+      cat > spotbugs-security-include.xml <<'EOF'
+      <FindBugsFilter>
+        <Match>
+          <Bug category="SECURITY"/>
+        </Match>
+      </FindBugsFilter>
+      EOF
+
+    - |
+      for dir in $SERVICES; do
+        if [ "$dir" = "frontend" ]; then
+          echo "Skipping frontend: FindSecBugs is for Java services only"
+          continue
+        fi
+
+        if [ -f "$dir/pom.xml" ]; then
+          echo "Running OWASP Find Security Bugs on Maven service: $dir"
+          cd "$dir"
+
+          chmod +x mvnw || true
+
+          if [ -f "./mvnw" ]; then
+            ./mvnw clean compile spotbugs:spotbugs -DskipTests || true
+          else
+            mvn clean compile spotbugs:spotbugs -DskipTests || true
+          fi
+
+          cd ..
+          mkdir -p "reports/findsecbugs/$dir"
+          cp "$dir/target/spotbugsXml.xml" "reports/findsecbugs/$dir/" 2>/dev/null || true
+          cp "$dir/target/site/spotbugs.html" "reports/findsecbugs/$dir/" 2>/dev/null || true
+
+        elif [ -f "$dir/build.gradle" ] || [ -f "$dir/build.gradle.kts" ]; then
+          echo "Running OWASP Find Security Bugs on Gradle service: $dir"
+          cd "$dir"
+
+          chmod +x gradlew || true
+
+          if [ -f "./gradlew" ]; then
+            ./gradlew clean compileJava spotbugsMain -x test || true
+          else
+            gradle clean compileJava spotbugsMain -x test || true
+          fi
+
+          cd ..
+          mkdir -p "reports/findsecbugs/$dir"
+          cp -r "$dir/build/reports/spotbugs/"* "reports/findsecbugs/$dir/" 2>/dev/null || true
+        fi
+      done
   artifacts:
     when: always
     paths:
-      - reports/owasp/
+      - reports/findsecbugs/
+    expire_in: 7 days
   allow_failure: true
 
 junit_tests:
