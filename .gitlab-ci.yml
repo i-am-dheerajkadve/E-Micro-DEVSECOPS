@@ -1,0 +1,231 @@
+stages:
+  - prepare_tools
+  - sonarqube
+  - owasp
+  - test
+  - build_artifact
+  - upload_reports
+  - docker_build
+  - trivy_scan
+  - docker_push
+
+variables:
+  IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
+  DOCKERHUB_NAMESPACE: "$DOCKERHUB_USER"
+  NEXUS_RAW_REPO: "devsecops-reports"
+  SERVICES: "api-gateway user-service product-service cart-service order-service payment-service inventory-service notification-service frontend"
+
+cache:
+  paths:
+    - .m2/repository/
+    - .gradle/
+
+start_sonar_nexus:
+  stage: prepare_tools
+  tags:
+    - devsecops
+  script:
+    - docker compose -f sonar-nexus/docker-compose.yml up -d
+    - echo "Waiting 120 seconds for SonarQube and Nexus..."
+    - sleep 120
+    - docker ps
+
+sonarqube_scan:
+  stage: sonarqube
+  tags:
+    - devsecops
+  script:
+    - docker run --rm -v "$PWD:/usr/src" -w /usr/src sonarsource/sonar-scanner-cli:latest sonar-scanner
+      -Dsonar.projectKey=E-Micro-DEVSECOPS
+      -Dsonar.projectName=E-Micro-DEVSECOPS
+      -Dsonar.sources=.
+      -Dsonar.host.url=$SONAR_HOST_URL
+      -Dsonar.token=$SONAR_TOKEN
+  allow_failure: true
+
+owasp_dependency_scan:
+  stage: owasp
+  tags:
+    - devsecops
+  script:
+    - mkdir -p reports/owasp
+    - docker run --rm -v "$PWD:/src" -v "$PWD/reports/owasp:/report" owasp/dependency-check:latest
+      --project "E-Micro-DEVSECOPS"
+      --scan /src
+      --format HTML
+      --format JSON
+      --out /report
+      --disableYarnAudit
+      --disableNodeAudit
+  artifacts:
+    when: always
+    paths:
+      - reports/owasp/
+  allow_failure: true
+
+junit_tests:
+  stage: test
+  tags:
+    - devsecops
+  script:
+    - mkdir -p reports/junit
+    - |
+      for dir in $SERVICES; do
+        if [ -f "$dir/pom.xml" ]; then
+          echo "Testing Maven service: $dir"
+          cd "$dir"
+          chmod +x mvnw || true
+          if [ -f "./mvnw" ]; then ./mvnw test; else mvn test; fi
+          cd ..
+          mkdir -p "reports/junit/$dir"
+          cp -r "$dir/target/surefire-reports/"*.xml "reports/junit/$dir/" 2>/dev/null || true
+
+        elif [ -f "$dir/build.gradle" ] || [ -f "$dir/build.gradle.kts" ]; then
+          echo "Testing Gradle service: $dir"
+          cd "$dir"
+          chmod +x gradlew || true
+          if [ -f "./gradlew" ]; then ./gradlew test; else gradle test; fi
+          cd ..
+          mkdir -p "reports/junit/$dir"
+          cp -r "$dir/build/test-results/test/"*.xml "reports/junit/$dir/" 2>/dev/null || true
+        fi
+      done
+  artifacts:
+    when: always
+    paths:
+      - reports/junit/
+    reports:
+      junit:
+        - reports/junit/**/*.xml
+  allow_failure: true
+
+build_artifacts:
+  stage: build_artifact
+  tags:
+    - devsecops
+  script:
+    - mkdir -p build-artifacts
+    - |
+      for dir in $SERVICES; do
+        if [ "$dir" = "frontend" ]; then
+          echo "Skipping frontend jar build"
+          continue
+        fi
+
+        if [ -f "$dir/pom.xml" ]; then
+          echo "Building Maven service: $dir"
+          cd "$dir"
+          chmod +x mvnw || true
+          if [ -f "./mvnw" ]; then ./mvnw clean package -DskipTests; else mvn clean package -DskipTests; fi
+          cd ..
+          cp "$dir/target/"*.jar build-artifacts/ 2>/dev/null || true
+
+        elif [ -f "$dir/build.gradle" ] || [ -f "$dir/build.gradle.kts" ]; then
+          echo "Building Gradle service: $dir"
+          cd "$dir"
+          chmod +x gradlew || true
+          if [ -f "./gradlew" ]; then ./gradlew clean build -x test; else gradle clean build -x test; fi
+          cd ..
+          cp "$dir/build/libs/"*.jar build-artifacts/ 2>/dev/null || true
+        fi
+      done
+  artifacts:
+    paths:
+      - build-artifacts/
+
+upload_reports_to_nexus:
+  stage: upload_reports
+  tags:
+    - devsecops
+  script:
+    - |
+      upload_file() {
+        file="$1"
+        curl -u "$NEXUS_USER:$NEXUS_PASS" \
+          --upload-file "$file" \
+          "$NEXUS_URL/repository/$NEXUS_RAW_REPO/$CI_PIPELINE_ID/$file"
+      }
+
+      find reports build-artifacts -type f | while read file; do
+        upload_file "$file"
+      done
+  dependencies:
+    - owasp_dependency_scan
+    - junit_tests
+    - build_artifacts
+  allow_failure: true
+
+docker_build:
+  stage: docker_build
+  tags:
+    - devsecops
+  script:
+    - mkdir -p image-list
+    - rm -f image-list/images.txt
+    - |
+      for service in $SERVICES; do
+        image="$DOCKERHUB_NAMESPACE/$service:$IMAGE_TAG"
+        echo "Building Docker image: $image"
+        docker build -t "$image" "./$service"
+        echo "$image" >> image-list/images.txt
+      done
+  artifacts:
+    paths:
+      - image-list/images.txt
+
+trivy_scan:
+  stage: trivy_scan
+  tags:
+    - devsecops
+  before_script:
+    - command -v trivy || curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+  script:
+    - mkdir -p reports/trivy
+    - |
+      while read image; do
+        service_name=$(basename "$image" | cut -d':' -f1)
+        trivy image --format json --output "reports/trivy/$service_name-trivy.json" "$image" || true
+        trivy image --format table --output "reports/trivy/$service_name-trivy.txt" "$image" || true
+      done < image-list/images.txt
+  artifacts:
+    when: always
+    paths:
+      - reports/trivy/
+  dependencies:
+    - docker_build
+  allow_failure: true
+
+upload_trivy_reports_to_nexus:
+  stage: trivy_scan
+  tags:
+    - devsecops
+  script:
+    - |
+      for file in reports/trivy/*; do
+        [ -f "$file" ] || continue
+        curl -u "$NEXUS_USER:$NEXUS_PASS" \
+          --upload-file "$file" \
+          "$NEXUS_URL/repository/$NEXUS_RAW_REPO/$CI_PIPELINE_ID/trivy/$(basename "$file")"
+      done
+  dependencies:
+    - trivy_scan
+  allow_failure: true
+
+docker_push:
+  stage: docker_push
+  tags:
+    - devsecops
+  before_script:
+    - echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
+  script:
+    - |
+      while read image; do
+        service_name=$(basename "$image" | cut -d':' -f1)
+        latest_image="$DOCKERHUB_NAMESPACE/$service_name:latest"
+
+        docker push "$image"
+        docker tag "$image" "$latest_image"
+        docker push "$latest_image"
+      done < image-list/images.txt
+  dependencies:
+    - docker_build
