@@ -122,7 +122,9 @@ sonarqube_scan:
           bash -c "gradle clean classes -x test --no-daemon"
         fi
       done
-
+    - rm -rf .scannerwork .sonar reports/sonarqube
+    - mkdir -p .scannerwork .sonar reports/sonarqube
+    - chmod -R 777 .scannerwork .sonar reports
     # Run SonarQube scan.
     - |
       SONAR_FAILED=0
