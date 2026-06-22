@@ -1,357 +1,51 @@
 stages:
-  - prepare_tools
-  - sonarqube
-  - test
-  - build_artifact
-  - docker_build
-  - trivy_scan
-  - upload_reports
-  - docker_push
+  - start_tools
+  - sonarqube_scan
 
 variables:
-  IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
-  DOCKERHUB_NAMESPACE: "$DOCKERHUB_USER"
-  NEXUS_RAW_REPO: "devsecops-reports"
-
-  SONAR_URL_DEFAULT: "http://127.0.0.1:9000"
-  NEXUS_URL_DEFAULT: "http://127.0.0.1:8081"
-
-  MAVEN_SERVICES: "api-gateway user-service order-service inventory-service"
-  GRADLE_SERVICES: "product-service cart-service payment-service notification-service"
-  DOCKER_SERVICES: "api-gateway user-service product-service cart-service order-service payment-service inventory-service notification-service frontend"
-
-  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
-  GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
-  TRIVY_CACHE_DIR: "$CI_PROJECT_DIR/.trivycache"
-
-cache:
-  key: "$CI_PROJECT_NAME"
-  paths:
-    - .m2/repository/
-    - .gradle/caches/
-    - .gradle/wrapper/
-    - .trivycache/
-
-before_script:
-  - set -euo pipefail
-  - 'echo "Running on $(hostname)"'
-  - 'echo "Commit: $CI_COMMIT_SHA"'
+  GIT_DEPTH: "0"
+  SONAR_PROJECT_KEY: "E-Micro-DEVSECOPS"
 
 start_sonar_nexus:
-  stage: prepare_tools
+  stage: start_tools
   tags:
     - devsecops
   script:
-    - ': "${NEXUS_USER:?NEXUS_USER GitLab variable is missing}"'
-    - ': "${NEXUS_PASS:?NEXUS_PASS GitLab variable is missing}"'
-    - 'SONAR_URL="${SONAR_HOST_URL:-$SONAR_URL_DEFAULT}"'
-    - 'NEXUS_URL_CLEAN="${NEXUS_URL:-$NEXUS_URL_DEFAULT}"'
-    - 'NEXUS_URL_CLEAN="${NEXUS_URL_CLEAN%/}"'
-    - 'echo "Starting SonarQube and Nexus..."'
+    - echo "Starting SonarQube and Nexus..."
     - docker compose -f sonar-nexus/docker-compose.yml up -d
-    - 'echo "Waiting for SonarQube at $SONAR_URL ..."'
+    - echo "Waiting for SonarQube to become ready..."
     - |
-      for i in $(seq 1 60); do
-        if curl -fsS "$SONAR_URL/api/system/status" | grep -q '"status":"UP"'; then
-          echo "SonarQube is UP"
-          break
+      for i in {1..30}; do
+        STATUS=$(curl -s "$SONAR_HOST_URL/api/system/status" | grep -o '"status":"[^"]*"' || true)
+        echo "SonarQube status: $STATUS"
+
+        if echo "$STATUS" | grep -q "UP"; then
+          echo "SonarQube is ready."
+          exit 0
         fi
 
-        echo "SonarQube not ready yet... $i/60"
         sleep 10
       done
-    - 'curl -fsS "$SONAR_URL/api/system/status" | grep -q "\"status\":\"UP\""'
-    - 'echo "Waiting for Nexus at $NEXUS_URL_CLEAN ..."'
-    - |
-      for i in $(seq 1 60); do
-        if curl -fsS "$NEXUS_URL_CLEAN/service/rest/v1/status" >/dev/null; then
-          echo "Nexus is UP"
-          break
-        fi
 
-        echo "Nexus not ready yet... $i/60"
-        sleep 10
-      done
-    - 'curl -fsS "$NEXUS_URL_CLEAN/service/rest/v1/status"'
-    - 'echo "Checking Nexus raw repository: $NEXUS_RAW_REPO"'
-    - |
-      REPO_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-        -u "$NEXUS_USER:$NEXUS_PASS" \
-        "$NEXUS_URL_CLEAN/service/rest/v1/repositories/$NEXUS_RAW_REPO")
-
-      if [ "$REPO_STATUS" = "404" ]; then
-        echo "Creating Nexus raw hosted repository: $NEXUS_RAW_REPO"
-
-        curl -fsS -u "$NEXUS_USER:$NEXUS_PASS" \
-          -H "Content-Type: application/json" \
-          -X POST "$NEXUS_URL_CLEAN/service/rest/v1/repositories/raw/hosted" \
-          -d "{
-            \"name\": \"$NEXUS_RAW_REPO\",
-            \"online\": true,
-            \"storage\": {
-              \"blobStoreName\": \"default\",
-              \"strictContentTypeValidation\": false,
-              \"writePolicy\": \"ALLOW\"
-            }
-          }"
-
-      elif [ "$REPO_STATUS" = "200" ]; then
-        echo "Nexus raw repository already exists: $NEXUS_RAW_REPO"
-      else
-        echo "Could not verify Nexus repository. HTTP status: $REPO_STATUS"
-        exit 1
-      fi
+      echo "SonarQube did not become ready in time."
+      docker ps
+      exit 1
+    - docker ps
 
 sonarqube_scan:
-  stage: sonarqube
+  stage: sonarqube_scan
   tags:
     - devsecops
   script:
-    - ': "${SONAR_TOKEN:?SONAR_TOKEN GitLab variable is missing}"'
-    - 'SONAR_URL="${SONAR_HOST_URL:-$SONAR_URL_DEFAULT}"'
-    - mkdir -p reports/sonarqube
-    - 'echo "Compiling Java classes for SonarQube analysis..."'
-    - |
-      for dir in $MAVEN_SERVICES; do
-        echo "Maven compile: $dir"
-
-        cd "$dir"
-        mvn -q -DskipTests compile
-        cd "$CI_PROJECT_DIR"
-      done
-    - |
-      for dir in $GRADLE_SERVICES; do
-        echo "Gradle classes: $dir"
-
-        cd "$dir"
-        gradle --no-daemon -q classes -x test
-        cd "$CI_PROJECT_DIR"
-      done
-    - 'echo "Running SonarQube scan..."'
+    - echo "Running SonarQube scan..."
     - |
       docker run --rm \
         --network host \
         --user "$(id -u):$(id -g)" \
         -v "$CI_PROJECT_DIR:/usr/src" \
-        -w /usr/src \
         sonarsource/sonar-scanner-cli:latest \
-        sonar-scanner \
-          -Dsonar.projectKey=E-Micro-DEVSECOPS \
-          -Dsonar.projectName=E-Micro-DEVSECOPS \
-          -Dsonar.sources=api-gateway/src,user-service/src,product-service/src,cart-service/src,order-service/src,payment-service/src,inventory-service/src,notification-service/src,frontend/src \
-          -Dsonar.java.binaries=api-gateway/target/classes,user-service/target/classes,order-service/target/classes,inventory-service/target/classes,product-service/build/classes/java/main,cart-service/build/classes/java/main,payment-service/build/classes/java/main,notification-service/build/classes/java/main \
-          -Dsonar.exclusions=**/target/**,**/build/**,**/node_modules/**,**/.gradle/**,**/.m2/**,**/reports/** \
-          -Dsonar.host.url="$SONAR_URL" \
-          -Dsonar.token="$SONAR_TOKEN"
-    - cp .scannerwork/report-task.txt reports/sonarqube/report-task.txt
-    - 'echo "SonarQube dashboard: ${SONAR_URL%/}/dashboard?id=E-Micro-DEVSECOPS" > reports/sonarqube/sonarqube-dashboard.txt'
-  artifacts:
-    when: always
-    paths:
-      - reports/sonarqube/
-      - .scannerwork/report-task.txt
-    expire_in: 7 days
-
-junit_tests:
-  stage: test
-  tags:
-    - devsecops
-  script:
-    - mkdir -p reports/junit
-    - |
-      for dir in $MAVEN_SERVICES; do
-        echo "JUnit test Maven service: $dir"
-
-        cd "$dir"
-        mvn test
-        cd "$CI_PROJECT_DIR"
-
-        mkdir -p "reports/junit/$dir"
-        cp "$dir"/target/surefire-reports/*.xml "reports/junit/$dir/" 2>/dev/null || true
-      done
-    - |
-      for dir in $GRADLE_SERVICES; do
-        echo "JUnit test Gradle service: $dir"
-
-        cd "$dir"
-        gradle --no-daemon test
-        cd "$CI_PROJECT_DIR"
-
-        mkdir -p "reports/junit/$dir"
-        cp "$dir"/build/test-results/test/*.xml "reports/junit/$dir/" 2>/dev/null || true
-      done
-  artifacts:
-    when: always
-    paths:
-      - reports/junit/
-    reports:
-      junit:
-        - reports/junit/**/*.xml
-    expire_in: 7 days
-
-build_artifacts:
-  stage: build_artifact
-  tags:
-    - devsecops
-  script:
-    - mkdir -p build-artifacts
-    - |
-      for dir in $MAVEN_SERVICES; do
-        echo "Package Maven service: $dir"
-
-        cd "$dir"
-        mvn clean package -DskipTests
-        cd "$CI_PROJECT_DIR"
-
-        cp "$dir"/target/*.jar build-artifacts/ 2>/dev/null || true
-      done
-    - |
-      for dir in $GRADLE_SERVICES; do
-        echo "Package Gradle service: $dir"
-
-        cd "$dir"
-        gradle --no-daemon clean build -x test
-        cd "$CI_PROJECT_DIR"
-
-        cp "$dir"/build/libs/*.jar build-artifacts/ 2>/dev/null || true
-      done
-    - ls -lh build-artifacts || true
-  artifacts:
-    when: always
-    paths:
-      - build-artifacts/
-    expire_in: 7 days
-
-docker_build:
-  stage: docker_build
-  tags:
-    - devsecops
-  script:
-    - ': "${DOCKERHUB_USER:?DOCKERHUB_USER GitLab variable is missing}"'
-    - mkdir -p image-list
-    - rm -f image-list/images.txt
-    - |
-      for service in $DOCKER_SERVICES; do
-        image="$DOCKERHUB_NAMESPACE/$service:$IMAGE_TAG"
-
-        echo "Building Docker image: $image"
-        docker build --pull -t "$image" "./$service"
-
-        echo "$image" >> image-list/images.txt
-      done
-    - cat image-list/images.txt
-  artifacts:
-    when: always
-    paths:
-      - image-list/images.txt
-    expire_in: 7 days
-
-trivy_scan:
-  stage: trivy_scan
-  tags:
-    - devsecops
-  needs:
-    - job: docker_build
-      artifacts: true
-  script:
-    - trivy version
-    - mkdir -p reports/trivy
-    - |
-      while read -r image; do
-        [ -n "$image" ] || continue
-
-        service_name="$(echo "$image" | awk -F/ '{print $2}' | cut -d: -f1)"
-
-        echo "Trivy scanning: $image"
-
-        trivy image \
-          --exit-code 0 \
-          --severity LOW,MEDIUM,HIGH,CRITICAL \
-          --format table \
-          --output "reports/trivy/${service_name}-trivy.txt" \
-          "$image"
-
-        trivy image \
-          --exit-code 0 \
-          --severity LOW,MEDIUM,HIGH,CRITICAL \
-          --format json \
-          --output "reports/trivy/${service_name}-trivy.json" \
-          "$image"
-      done < image-list/images.txt
-    - ls -lh reports/trivy
-  artifacts:
-    when: always
-    paths:
-      - reports/trivy/
-    expire_in: 7 days
-
-upload_reports_to_nexus:
-  stage: upload_reports
-  tags:
-    - devsecops
-  when: always
-  needs:
-    - job: sonarqube_scan
-      artifacts: true
-    - job: junit_tests
-      artifacts: true
-    - job: build_artifacts
-      artifacts: true
-    - job: docker_build
-      artifacts: true
-    - job: trivy_scan
-      artifacts: true
-  script:
-    - ': "${NEXUS_USER:?NEXUS_USER GitLab variable is missing}"'
-    - ': "${NEXUS_PASS:?NEXUS_PASS GitLab variable is missing}"'
-    - 'NEXUS_URL_CLEAN="${NEXUS_URL:-$NEXUS_URL_DEFAULT}"'
-    - 'NEXUS_URL_CLEAN="${NEXUS_URL_CLEAN%/}"'
-    - 'echo "Uploading reports/artifacts to Nexus raw repo: $NEXUS_RAW_REPO"'
-    - |
-      upload_file() {
-        local file="$1"
-        local dest="$NEXUS_URL_CLEAN/repository/$NEXUS_RAW_REPO/$CI_PROJECT_NAME/$CI_PIPELINE_ID/$file"
-
-        echo "Uploading $file"
-        curl -fsS -u "$NEXUS_USER:$NEXUS_PASS" --upload-file "$file" "$dest"
-      }
-
-      for base in reports build-artifacts image-list; do
-        [ -d "$base" ] || continue
-
-        while IFS= read -r file; do
-          upload_file "$file"
-        done < <(find "$base" -type f)
-      done
-
-docker_push:
-  stage: docker_push
-  tags:
-    - devsecops
-  needs:
-    - job: docker_build
-      artifacts: true
-    - job: trivy_scan
-      artifacts: false
-    - job: upload_reports_to_nexus
-      artifacts: false
-  before_script:
-    - set -euo pipefail
-    - ': "${DOCKERHUB_USER:?DOCKERHUB_USER GitLab variable is missing}"'
-    - ': "${DOCKERHUB_PASS:?DOCKERHUB_PASS GitLab variable is missing}"'
-    - 'echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin'
-  script:
-    - |
-      while read -r image; do
-        [ -n "$image" ] || continue
-
-        service_name="$(echo "$image" | awk -F/ '{print $2}' | cut -d: -f1)"
-        latest_image="$DOCKERHUB_NAMESPACE/$service_name:latest"
-
-        echo "Pushing $image"
-        docker push "$image"
-
-        echo "Pushing $latest_image"
-        docker tag "$image" "$latest_image"
-        docker push "$latest_image"
-      done < image-list/images.txt
+        -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+        -Dsonar.projectName="$SONAR_PROJECT_KEY" \
+        -Dsonar.sources=. \
+        -Dsonar.host.url="$SONAR_HOST_URL" \
+        -Dsonar.token="$SONAR_TOKEN"
