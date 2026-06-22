@@ -114,16 +114,12 @@ sonarqube_scan:
             -w "/workspace/$dir" \
             maven:3.9.9-eclipse-temurin-17 \
             mvn clean compile -DskipTests
-
         elif [ -f "$dir/build.gradle" ] || [ -f "$dir/build.gradle.kts" ]; then
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$CI_PROJECT_DIR:/workspace" \
-            -v "$GRADLE_USER_HOME:/home/gradle/.gradle" \
-            -e GRADLE_USER_HOME=/home/gradle/.gradle \
-            -w "/workspace/$dir" \
-            gradle:7.5.1-jdk17 \
-            gradle clean classes -x test
+         docker run --rm \
+          -v "$CI_PROJECT_DIR:/workspace" \
+          -w "/workspace/$dir" \
+          gradle:7.5.1-jdk17 \
+          bash -c "gradle clean classes -x test --no-daemon"
         fi
       done
 
@@ -144,7 +140,6 @@ sonarqube_scan:
         -Dsonar.sources=. \
         -Dsonar.host.url="$SONAR_HOST_URL" \
         -Dsonar.token="$SONAR_TOKEN" \
-        -Dsonar.qualitygate.wait=true \
         -Dsonar.java.binaries="api-gateway/target/classes,user-service/target/classes,order-service/target/classes,inventory-service/target/classes,product-service/build/classes,cart-service/build/classes,payment-service/build/classes,notification-service/build/classes" \
         -Dsonar.exclusions="**/node_modules/**,**/target/**,**/build/**,**/.gradle/**,**/.m2/**,reports/**" \
         || SONAR_FAILED=1
@@ -226,14 +221,11 @@ junit_tests:
           cp -r "$dir/target/surefire-reports/"*.xml "reports/junit/$dir/" 2>/dev/null || true
 
         elif [ -f "$dir/build.gradle" ] || [ -f "$dir/build.gradle.kts" ]; then
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$CI_PROJECT_DIR:/workspace" \
-            -v "$GRADLE_USER_HOME:/home/gradle/.gradle" \
-            -e GRADLE_USER_HOME=/home/gradle/.gradle \
-            -w "/workspace/$dir" \
-            gradle:7.5.1-jdk17 \
-            gradle test || TEST_FAILED=1
+         docker run --rm \
+          -v "$CI_PROJECT_DIR:/workspace" \
+          -w "/workspace/$dir" \
+          gradle:7.5.1-jdk17 \
+          bash -c "gradle test --no-daemon" || TEST_FAILED=1
 
           cp -r "$dir/build/test-results/test/"*.xml "reports/junit/$dir/" 2>/dev/null || true
         fi
