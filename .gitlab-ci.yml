@@ -8,8 +8,7 @@ variables:
 
 start_sonar_nexus:
   stage: start_tools
-  tags:
-    - devsecops
+ 
   script:
     - echo "Starting SonarQube and Nexus..."
     - docker compose -f sonar-nexus/docker-compose.yml up -d
@@ -34,8 +33,7 @@ start_sonar_nexus:
 
 sonarqube_scan:
   stage: sonarqube_scan
-  tags:
-    - devsecops
+
   script:
     - echo "Running SonarQube scan..."
     - |
