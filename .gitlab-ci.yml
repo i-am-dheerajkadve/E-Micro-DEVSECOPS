@@ -1,80 +1,248 @@
 stages:
   - prepare_tools
   - sonarqube
-  - test
-  - build_artifact
-  - upload_reports
+  - junit_test
   - docker_build
   - trivy_scan
   - docker_push
 
 variables:
   IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
+
+  # DockerHub namespace should come from GitLab CI/CD variable DOCKERHUB_USER
   DOCKERHUB_NAMESPACE: "$DOCKERHUB_USER"
+
+  # Nexus raw repository name
   NEXUS_RAW_REPO: "devsecops-reports"
+
+  # Because SonarQube and Nexus run on the same EC2 as the GitLab runner
+  SONAR_HOST_URL: "http://127.0.0.1:9000"
+  NEXUS_URL: "http://127.0.0.1:8081"
+
+  SONAR_PROJECT_KEY: "E-Micro-DEVSECOPS"
+  SONAR_PROJECT_NAME: "E-Micro-DEVSECOPS"
+
   SERVICES: "api-gateway user-service product-service cart-service order-service payment-service inventory-service notification-service frontend"
+  JAVA_SERVICES: "api-gateway user-service product-service cart-service order-service payment-service inventory-service notification-service"
+
+  MAVEN_CACHE: "$CI_PROJECT_DIR/.m2"
+  GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
 
 cache:
+  key: "$CI_PROJECT_NAME"
   paths:
-    - .m2/repository/
+    - .m2/
     - .gradle/
+    - .sonar/
+    - .trivycache/
 
+default:
+  tags:
+    - devsecops
+
+# ---------------------------------------------------------
+# 1. Start SonarQube and Nexus from sonar-nexus/docker-compose.yml
+# ---------------------------------------------------------
 start_sonar_nexus:
   stage: prepare_tools
-  tags:
-    - devsecops
   script:
     - docker compose -f sonar-nexus/docker-compose.yml up -d
-    - echo "Waiting 120 seconds for SonarQube and Nexus..."
-    - sleep 120
+    - echo "Waiting for SonarQube and Nexus..."
+
+    - |
+      for i in $(seq 1 60); do
+        if curl -sf "$SONAR_HOST_URL/api/system/status" | grep -E '"status":"(UP|DEGRADED)"' > /dev/null; then
+          echo "SonarQube is ready."
+          break
+        fi
+        echo "Waiting for SonarQube... attempt $i"
+        sleep 5
+      done
+
+    - |
+      for i in $(seq 1 60); do
+        if curl -sf "$NEXUS_URL" > /dev/null; then
+          echo "Nexus is ready."
+          break
+        fi
+        echo "Waiting for Nexus... attempt $i"
+        sleep 5
+      done
+
     - docker ps
 
+# ---------------------------------------------------------
+# 2. SonarQube scan + upload SonarQube JSON reports to Nexus
+# ---------------------------------------------------------
 sonarqube_scan:
   stage: sonarqube
-  tags:
-    - devsecops
+  needs:
+    - start_sonar_nexus
   script:
-    docker run --rm \
-    --network host \
-    -v "$PWD:/usr/src" \
-    -w /usr/src \
-    sonarsource/sonar-scanner-cli:latest \
-    sonar-scanner \
-    -Dsonar.projectKey=E-Micro-DEVSECOPS \
-    -Dsonar.projectName=E-Micro-DEVSECOPS \
-    -Dsonar.sources=. \
-    -Dsonar.host.url=http://127.0.0.1:9000 \
-    -Dsonar.token=$SONAR_TOKEN
-  allow_failure: true
+    - mkdir -p reports/sonarqube "$MAVEN_CACHE" "$GRADLE_USER_HOME" .sonar
 
-        
-junit_tests:
-  stage: test
-  tags:
-    - devsecops
-  script:
-    - mkdir -p reports/junit
     - |
-      for dir in $SERVICES; do
+      upload_dir_to_nexus() {
+        local dir="$1"
+        local nexus_folder="$2"
+
+        if [ ! -d "$dir" ]; then
+          echo "Directory $dir not found, skipping Nexus upload."
+          return 0
+        fi
+
+        find "$dir" -type f | while read -r file; do
+          rel="${file#$dir/}"
+          echo "Uploading $file to Nexus..."
+          curl --fail -u "$NEXUS_USER:$NEXUS_PASS" \
+            --upload-file "$file" \
+            "$NEXUS_URL/repository/$NEXUS_RAW_REPO/$CI_PROJECT_NAME/$CI_PIPELINE_ID/$nexus_folder/$rel"
+        done
+      }
+
+    # Compile Java code first because SonarQube Java scan needs class files.
+    - |
+      for dir in $JAVA_SERVICES; do
+        echo "Preparing bytecode for SonarQube: $dir"
+
         if [ -f "$dir/pom.xml" ]; then
-          echo "Testing Maven service: $dir"
-          cd "$dir"
-          chmod +x mvnw || true
-          if [ -f "./mvnw" ]; then ./mvnw test; else mvn test; fi
-          cd ..
-          mkdir -p "reports/junit/$dir"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$CI_PROJECT_DIR:/workspace" \
+            -v "$MAVEN_CACHE:/tmp/.m2" \
+            -e MAVEN_CONFIG=/tmp/.m2 \
+            -w "/workspace/$dir" \
+            maven:3.9.9-eclipse-temurin-17 \
+            mvn clean compile -DskipTests
+
+        elif [ -f "$dir/build.gradle" ] || [ -f "$dir/build.gradle.kts" ]; then
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$CI_PROJECT_DIR:/workspace" \
+            -v "$GRADLE_USER_HOME:/home/gradle/.gradle" \
+            -e GRADLE_USER_HOME=/home/gradle/.gradle \
+            -w "/workspace/$dir" \
+            gradle:7.5.1-jdk17 \
+            gradle clean classes -x test
+        fi
+      done
+
+    # Run SonarQube scan.
+    - |
+      SONAR_FAILED=0
+
+      docker run --rm \
+        --network host \
+        --user "$(id -u):$(id -g)" \
+        -e SONAR_USER_HOME=/tmp/.sonar \
+        -v "$CI_PROJECT_DIR:/usr/src" \
+        -v "$CI_PROJECT_DIR/.sonar:/tmp/.sonar" \
+        -w /usr/src \
+        sonarsource/sonar-scanner-cli:latest \
+        -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+        -Dsonar.projectName="$SONAR_PROJECT_NAME" \
+        -Dsonar.sources=. \
+        -Dsonar.host.url="$SONAR_HOST_URL" \
+        -Dsonar.token="$SONAR_TOKEN" \
+        -Dsonar.qualitygate.wait=true \
+        -Dsonar.java.binaries="api-gateway/target/classes,user-service/target/classes,order-service/target/classes,inventory-service/target/classes,product-service/build/classes,cart-service/build/classes,payment-service/build/classes,notification-service/build/classes" \
+        -Dsonar.exclusions="**/node_modules/**,**/target/**,**/build/**,**/.gradle/**,**/.m2/**,reports/**" \
+        || SONAR_FAILED=1
+
+      echo "$SONAR_FAILED" > reports/sonarqube/sonar_exit_code.txt
+
+    # Download basic SonarQube reports from API.
+    - |
+      curl -sf -u "$SONAR_TOKEN:" \
+        "$SONAR_HOST_URL/api/qualitygates/project_status?projectKey=$SONAR_PROJECT_KEY" \
+        -o reports/sonarqube/quality-gate.json || true
+
+      curl -sf -u "$SONAR_TOKEN:" \
+        "$SONAR_HOST_URL/api/measures/component?component=$SONAR_PROJECT_KEY&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,ncloc,security_hotspots" \
+        -o reports/sonarqube/measures.json || true
+
+      curl -sf -u "$SONAR_TOKEN:" \
+        "$SONAR_HOST_URL/api/issues/search?componentKeys=$SONAR_PROJECT_KEY&ps=500" \
+        -o reports/sonarqube/issues.json || true
+
+    - upload_dir_to_nexus "reports/sonarqube" "sonarqube"
+
+    # Keep pipeline moving for learning/demo even if quality gate fails.
+    - exit 0
+
+  artifacts:
+    when: always
+    paths:
+      - reports/sonarqube/
+    expire_in: 7 days
+
+# ---------------------------------------------------------
+# 3. JUnit tests + upload JUnit reports to Nexus
+# ---------------------------------------------------------
+junit_tests:
+  stage: junit_test
+  needs:
+    - start_sonar_nexus
+  script:
+    - mkdir -p reports/junit "$MAVEN_CACHE" "$GRADLE_USER_HOME"
+
+    - |
+      upload_dir_to_nexus() {
+        local dir="$1"
+        local nexus_folder="$2"
+
+        if [ ! -d "$dir" ]; then
+          echo "Directory $dir not found, skipping Nexus upload."
+          return 0
+        fi
+
+        find "$dir" -type f | while read -r file; do
+          rel="${file#$dir/}"
+          echo "Uploading $file to Nexus..."
+          curl --fail -u "$NEXUS_USER:$NEXUS_PASS" \
+            --upload-file "$file" \
+            "$NEXUS_URL/repository/$NEXUS_RAW_REPO/$CI_PROJECT_NAME/$CI_PIPELINE_ID/$nexus_folder/$rel"
+        done
+      }
+
+    - |
+      TEST_FAILED=0
+
+      for dir in $JAVA_SERVICES; do
+        echo "Running JUnit tests for: $dir"
+
+        mkdir -p "reports/junit/$dir"
+
+        if [ -f "$dir/pom.xml" ]; then
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$CI_PROJECT_DIR:/workspace" \
+            -v "$MAVEN_CACHE:/tmp/.m2" \
+            -e MAVEN_CONFIG=/tmp/.m2 \
+            -w "/workspace/$dir" \
+            maven:3.9.9-eclipse-temurin-17 \
+            mvn test || TEST_FAILED=1
+
           cp -r "$dir/target/surefire-reports/"*.xml "reports/junit/$dir/" 2>/dev/null || true
 
         elif [ -f "$dir/build.gradle" ] || [ -f "$dir/build.gradle.kts" ]; then
-          echo "Testing Gradle service: $dir"
-          cd "$dir"
-          chmod +x gradlew || true
-          if [ -f "./gradlew" ]; then ./gradlew test; else gradle test; fi
-          cd ..
-          mkdir -p "reports/junit/$dir"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$CI_PROJECT_DIR:/workspace" \
+            -v "$GRADLE_USER_HOME:/home/gradle/.gradle" \
+            -e GRADLE_USER_HOME=/home/gradle/.gradle \
+            -w "/workspace/$dir" \
+            gradle:7.5.1-jdk17 \
+            gradle test || TEST_FAILED=1
+
           cp -r "$dir/build/test-results/test/"*.xml "reports/junit/$dir/" 2>/dev/null || true
         fi
       done
+
+      upload_dir_to_nexus "reports/junit" "junit"
+
+      exit "$TEST_FAILED"
+
   artifacts:
     when: always
     paths:
@@ -82,134 +250,128 @@ junit_tests:
     reports:
       junit:
         - reports/junit/**/*.xml
-  allow_failure: true
+    expire_in: 7 days
 
-build_artifacts:
-  stage: build_artifact
-  tags:
-    - devsecops
-  script:
-    - mkdir -p build-artifacts
-    - |
-      for dir in $SERVICES; do
-        if [ "$dir" = "frontend" ]; then
-          echo "Skipping frontend jar build"
-          continue
-        fi
-
-        if [ -f "$dir/pom.xml" ]; then
-          echo "Building Maven service: $dir"
-          cd "$dir"
-          chmod +x mvnw || true
-          if [ -f "./mvnw" ]; then ./mvnw clean package -DskipTests; else mvn clean package -DskipTests; fi
-          cd ..
-          cp "$dir/target/"*.jar build-artifacts/ 2>/dev/null || true
-
-        elif [ -f "$dir/build.gradle" ] || [ -f "$dir/build.gradle.kts" ]; then
-          echo "Building Gradle service: $dir"
-          cd "$dir"
-          chmod +x gradlew || true
-          if [ -f "./gradlew" ]; then ./gradlew clean build -x test; else gradle clean build -x test; fi
-          cd ..
-          cp "$dir/build/libs/"*.jar build-artifacts/ 2>/dev/null || true
-        fi
-      done
-  artifacts:
-    paths:
-      - build-artifacts/
-
-upload_reports_to_nexus:
-  stage: upload_reports
-  tags:
-    - devsecops
-  script:
-    - |
-      upload_file() {
-        file="$1"
-        curl -u "$NEXUS_USER:$NEXUS_PASS" \
-          --upload-file "$file" \
-          "$NEXUS_URL/repository/$NEXUS_RAW_REPO/$CI_PIPELINE_ID/$file"
-      }
-
-      find reports build-artifacts -type f | while read file; do
-        upload_file "$file"
-      done
-  dependencies:
-    - junit_tests
-    - build_artifacts
-  allow_failure: true
-
+# ---------------------------------------------------------
+# 4. Build Docker images for all services and frontend
+# ---------------------------------------------------------
 docker_build:
   stage: docker_build
-  tags:
-    - devsecops
+  needs:
+    - junit_tests
   script:
     - mkdir -p image-list
     - rm -f image-list/images.txt
+    - touch image-list/images.txt
+
     - |
       for service in $SERVICES; do
+        if [ ! -f "$service/Dockerfile" ]; then
+          echo "No Dockerfile found in $service, skipping."
+          continue
+        fi
+
         image="$DOCKERHUB_NAMESPACE/$service:$IMAGE_TAG"
+
         echo "Building Docker image: $image"
-        docker build -t "$image" "./$service"
+        docker build --pull -t "$image" "./$service"
+
         echo "$image" >> image-list/images.txt
       done
+
+    - echo "Images built:"
+    - cat image-list/images.txt
+
   artifacts:
     paths:
       - image-list/images.txt
+    expire_in: 7 days
 
+# ---------------------------------------------------------
+# 5. Trivy scan Docker images + upload reports to Nexus
+# ---------------------------------------------------------
 trivy_scan:
   stage: trivy_scan
-  tags:
-    - devsecops
-  before_script:
-    - command -v trivy || curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+  needs:
+    - docker_build
+    - start_sonar_nexus
   script:
-    - mkdir -p reports/trivy
+    - mkdir -p reports/trivy .trivycache
+
     - |
-      while read image; do
-        service_name=$(basename "$image" | cut -d':' -f1)
-        trivy image --format json --output "reports/trivy/$service_name-trivy.json" "$image" || true
-        trivy image --format table --output "reports/trivy/$service_name-trivy.txt" "$image" || true
+      upload_dir_to_nexus() {
+        local dir="$1"
+        local nexus_folder="$2"
+
+        if [ ! -d "$dir" ]; then
+          echo "Directory $dir not found, skipping Nexus upload."
+          return 0
+        fi
+
+        find "$dir" -type f | while read -r file; do
+          rel="${file#$dir/}"
+          echo "Uploading $file to Nexus..."
+          curl --fail -u "$NEXUS_USER:$NEXUS_PASS" \
+            --upload-file "$file" \
+            "$NEXUS_URL/repository/$NEXUS_RAW_REPO/$CI_PROJECT_NAME/$CI_PIPELINE_ID/$nexus_folder/$rel"
+        done
+      }
+
+    - |
+      while read -r image; do
+        [ -z "$image" ] && continue
+
+        service_name="$(basename "${image%:*}")"
+
+        echo "Running Trivy scan for $image"
+
+        docker run --rm \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          -v "$CI_PROJECT_DIR/.trivycache:/root/.cache/" \
+          -v "$CI_PROJECT_DIR/reports/trivy:/reports" \
+          aquasec/trivy:latest \
+          image --format json --output "/reports/$service_name-trivy.json" "$image" || true
+
+        docker run --rm \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          -v "$CI_PROJECT_DIR/.trivycache:/root/.cache/" \
+          -v "$CI_PROJECT_DIR/reports/trivy:/reports" \
+          aquasec/trivy:latest \
+          image --format table --output "/reports/$service_name-trivy.txt" "$image" || true
+
       done < image-list/images.txt
+
+    - upload_dir_to_nexus "reports/trivy" "trivy"
+
   artifacts:
     when: always
     paths:
       - reports/trivy/
-  dependencies:
-    - docker_build
-  allow_failure: true
+    expire_in: 7 days
 
-upload_trivy_reports_to_nexus:
-  stage: trivy_scan
-  tags:
-    - devsecops
-  script:
-    - |
-      for file in reports/trivy/*; do
-        [ -f "$file" ] || continue
-        curl -u "$NEXUS_USER:$NEXUS_PASS" \
-          --upload-file "$file" \
-          "$NEXUS_URL/repository/$NEXUS_RAW_REPO/$CI_PIPELINE_ID/trivy/$(basename "$file")"
-      done
-  dependencies:
-    - trivy_scan
-  allow_failure: true
-
+# ---------------------------------------------------------
+# 6. Push all Docker images to DockerHub
+# ---------------------------------------------------------
 docker_push:
   stage: docker_push
-  tags:
-    - devsecops
+  needs:
+    - docker_build
+    - trivy_scan
   before_script:
     - echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
   script:
     - |
-      while read image; do
-        service_name=$(basename "$image" | cut -d':' -f1)
+      while read -r image; do
+        [ -z "$image" ] && continue
+
+        service_name="$(basename "${image%:*}")"
         latest_image="$DOCKERHUB_NAMESPACE/$service_name:latest"
 
+        echo "Pushing image: $image"
         docker push "$image"
+
+        echo "Tagging and pushing latest image: $latest_image"
         docker tag "$image" "$latest_image"
         docker push "$latest_image"
+
       done < image-list/images.txt
-  dependencies:
-    - docker_build
