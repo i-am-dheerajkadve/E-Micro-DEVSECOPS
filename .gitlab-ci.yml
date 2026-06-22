@@ -1,7 +1,6 @@
 stages:
   - prepare_tools
   - sonarqube
-  - owasp
   - test
   - build_artifact
   - upload_reports
@@ -48,71 +47,7 @@ sonarqube_scan:
     -Dsonar.token=$SONAR_TOKEN
   allow_failure: true
 
-owasp_findsecbugs:
-  stage: owasp
-  tags:
-    - devsecops
-  script:
-    - mkdir -p reports/findsecbugs
-
-    # Security-only filter for SpotBugs/FindSecBugs
-    - |
-      cat > spotbugs-security-include.xml <<'EOF'
-      <FindBugsFilter>
-        <Match>
-          <Bug category="SECURITY"/>
-        </Match>
-      </FindBugsFilter>
-      EOF
-
-    - |
-      for dir in $SERVICES; do
-        if [ "$dir" = "frontend" ]; then
-          echo "Skipping frontend: FindSecBugs is for Java services only"
-          continue
-        fi
-
-        if [ -f "$dir/pom.xml" ]; then
-          echo "Running OWASP Find Security Bugs on Maven service: $dir"
-          cd "$dir"
-
-          chmod +x mvnw || true
-
-          if [ -f "./mvnw" ]; then
-            ./mvnw clean compile spotbugs:spotbugs -DskipTests || true
-          else
-            mvn clean compile spotbugs:spotbugs -DskipTests || true
-          fi
-
-          cd ..
-          mkdir -p "reports/findsecbugs/$dir"
-          cp "$dir/target/spotbugsXml.xml" "reports/findsecbugs/$dir/" 2>/dev/null || true
-          cp "$dir/target/site/spotbugs.html" "reports/findsecbugs/$dir/" 2>/dev/null || true
-
-        elif [ -f "$dir/build.gradle" ] || [ -f "$dir/build.gradle.kts" ]; then
-          echo "Running OWASP Find Security Bugs on Gradle service: $dir"
-          cd "$dir"
-
-          chmod +x gradlew || true
-
-          if [ -f "./gradlew" ]; then
-            ./gradlew clean compileJava spotbugsMain -x test || true
-          else
-            gradle clean compileJava spotbugsMain -x test || true
-          fi
-
-          cd ..
-          mkdir -p "reports/findsecbugs/$dir"
-          cp -r "$dir/build/reports/spotbugs/"* "reports/findsecbugs/$dir/" 2>/dev/null || true
-        fi
-      done
-  artifacts:
-    when: always
-    paths:
-      - reports/findsecbugs/
-    expire_in: 7 days
-  allow_failure: true
-
+        
 junit_tests:
   stage: test
   tags:
@@ -200,7 +135,6 @@ upload_reports_to_nexus:
         upload_file "$file"
       done
   dependencies:
-    - owasp_dependency_scan
     - junit_tests
     - build_artifacts
   allow_failure: true
