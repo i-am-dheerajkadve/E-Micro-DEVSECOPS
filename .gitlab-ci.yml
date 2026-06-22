@@ -31,8 +31,8 @@ cache:
 
 before_script:
   - set -euo pipefail
-  - echo "Running on $(hostname)"
-  - echo "Commit: $CI_COMMIT_SHA"
+  - 'echo "Running on $(hostname)"'
+  - 'echo Commit: $CI_COMMIT_SHA"'
 
 start_sonar_nexus:
   stage: prepare_tools
@@ -64,7 +64,7 @@ start_sonar_nexus:
         sleep 10
       done
     - curl -fsS "$NEXUS_URL_CLEAN/service/rest/v1/status"
-    - echo "Checking Nexus raw repository: $NEXUS_RAW_REPO"
+    - 'echo "Checking Nexus raw repository: $NEXUS_RAW_REPO"'
     - |
       REPO_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -u "$NEXUS_USER:$NEXUS_PASS" "$NEXUS_URL_CLEAN/service/rest/v1/repositories/$NEXUS_RAW_REPO")
 
@@ -127,7 +127,7 @@ sonarqube_scan:
           -Dsonar.host.url="$SONAR_HOST_URL" \
           -Dsonar.token="$SONAR_TOKEN"
     - cp .scannerwork/report-task.txt reports/sonarqube/report-task.txt
-    - echo "SonarQube dashboard: ${SONAR_HOST_URL%/}/dashboard?id=E-Micro-DEVSECOPS" > reports/sonarqube/sonarqube-dashboard.txt
+    - 'echo "SonarQube dashboard: ${SONAR_HOST_URL%/}/dashboard?id=E-Micro-DEVSECOPS" > reports/sonarqube/sonarqube-dashboard.txt'
   artifacts:
     when: always
     paths:
@@ -274,7 +274,7 @@ upload_reports_to_nexus:
       artifacts: true
   script:
     - NEXUS_URL_CLEAN="${NEXUS_URL%/}"
-    - echo "Uploading reports/artifacts to Nexus raw repo: $NEXUS_RAW_REPO"
+    - 'echo "Uploading reports/artifacts to Nexus raw repo: $NEXUS_RAW_REPO"'
     - |
       upload_file() {
         local file="$1"
