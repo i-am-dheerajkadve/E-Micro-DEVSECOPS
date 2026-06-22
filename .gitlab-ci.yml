@@ -1,0 +1,52 @@
+stages:
+  - start_tools
+  - sonarqube_scan
+
+variables:
+  SONAR_HOST_URL: "http://localhost:9000"
+  SONAR_PROJECT_KEY: "E-Micro-DEVSECOPS"
+  SONAR_PROJECT_NAME: "E-Micro-DEVSECOPS"
+  GIT_DEPTH: "0"
+
+start_sonar_nexus:
+  stage: start_tools
+  tags:
+    - devsecops
+  script:
+    - echo "Starting SonarQube and Nexus..."
+    - cd sonar-nexus
+    - docker compose up -d
+    - echo "Waiting 120 seconds for SonarQube and Nexus to start..."
+    - sleep 120
+    - docker ps
+    - echo "Checking SonarQube status..."
+    - curl -f "$SONAR_HOST_URL/api/system/status" || true
+
+sonarqube_scan:
+  stage: sonarqube_scan
+  tags:
+    - devsecops
+  script:
+    - echo "Running SonarQube scan for full application code..."
+
+    # Create writable scanner folders to avoid permission errors
+    - mkdir -p .scannerwork .sonar/cache
+    - chmod -R 777 .scannerwork .sonar || true
+
+    # Run SonarScanner using Docker, no need to install sonar-scanner on EC2
+    - |
+      docker run --rm \
+        --network host \
+        --user "$(id -u):$(id -g)" \
+        -e SONAR_HOST_URL="$SONAR_HOST_URL" \
+        -e SONAR_TOKEN="$SONAR_TOKEN" \
+        -v "$PWD:/usr/src" \
+        -v "$PWD/.sonar/cache:/opt/sonar-scanner/.sonar/cache" \
+        sonarsource/sonar-scanner-cli:latest \
+        -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+        -Dsonar.projectName="$SONAR_PROJECT_NAME" \
+        -Dsonar.sources=. \
+        -Dsonar.host.url="$SONAR_HOST_URL" \
+        -Dsonar.token="$SONAR_TOKEN" \
+        -Dsonar.java.binaries=. \
+        -Dsonar.exclusions="**/node_modules/**,**/dist/**,**/build/**,**/target/**,**/.gradle/**,**/.m2/**,**/.git/**,**/reports/**"
