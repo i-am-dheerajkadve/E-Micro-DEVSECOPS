@@ -1,0 +1,10 @@
+namespace: ecommerce-devops
+
+postgres:
+  name: postgres
+  image: postgres:15
+  port: 5432
+  database: ecommerce
+  username: postgres
+  password: postgres
+  storage: 1Gi
