@@ -1,60 +1,52 @@
 stages:
-  - build
-  - test
-  - scan
-  - docker
-  - deploy
+  - start_tools
+  - sonarqube_scan
 
 variables:
-  MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository"
+  SONAR_HOST_URL: "http://localhost:9000"
+  SONAR_PROJECT_KEY: "E-Micro-DEVSECOPS"
+  SONAR_PROJECT_NAME: "E-Micro-DEVSECOPS"
+  GIT_DEPTH: "0"
 
-cache:
-  paths:
-    - .m2/repository
-    - .gradle/caches
-    - .gradle/wrapper
-
-build-maven:
-  stage: build
-  image: maven:3.8.6-openjdk-18
+start_sonar_nexus:
+  stage: start_tools
+  tags:
+    - devsecops
   script:
-    - for service in api-gateway user-service order-service inventory-service; do cd $service && mvn compile && cd ..; done
+    - echo "Starting SonarQube and Nexus..."
+    - cd sonar-nexus
+    - docker compose up -d
+    - echo "Waiting 120 seconds for SonarQube and Nexus to start..."
+    - sleep 120
+    - docker ps
+    - echo "Checking SonarQube status..."
+    - curl -f "$SONAR_HOST_URL/api/system/status" || true
 
-build-gradle:
-  stage: build
-  image: gradle:7.5.1-jdk17
+sonarqube_scan:
+  stage: sonarqube_scan
+  tags:
+    - devsecops
   script:
-    - for service in product-service cart-service payment-service notification-service; do cd $service && chmod +x gradlew && ./gradlew compileJava && cd ..; done
+    - echo "Running SonarQube scan for full application code..."
 
-test-maven:
-  stage: test
-  image: maven:3.8.6-openjdk-18
-  script:
-    - for service in api-gateway user-service order-service inventory-service; do cd $service && mvn test && cd ..; done
+    # Create writable scanner folders to avoid permission errors
+    - mkdir -p .scannerwork .sonar/cache
+    - chmod -R 777 .scannerwork .sonar || true
 
-test-gradle:
-  stage: test
-  image: gradle:7.5.1-jdk17
-  script:
-    - for service in product-service cart-service payment-service notification-service; do cd $service && chmod +x gradlew && ./gradlew test && cd ..; done
-
-security-scan:
-  stage: scan
-  image: maven:3.8.6-openjdk-18
-  script:
-    - echo "Running security scan / SonarQube / OWASP analysis..."
-
-docker-build:
-  stage: docker
-  image: docker:20.10.16
-  services:
-    - docker:20.10.16-dind
-  script:
-    - echo "Building and pushing docker images..."
-
-k8s-deploy:
-  stage: deploy
-  image: bitnami/kubectl:latest
-  script:
-    - echo "Deploying to Kubernetes namespace ecommerce-devops..."
-    # - kubectl apply -f k8s/
+    # Run SonarScanner using Docker, no need to install sonar-scanner on EC2
+    - |
+      docker run --rm \
+        --network host \
+        --user "$(id -u):$(id -g)" \
+        -e SONAR_HOST_URL="$SONAR_HOST_URL" \
+        -e SONAR_TOKEN="$SONAR_TOKEN" \
+        -v "$PWD:/usr/src" \
+        -v "$PWD/.sonar/cache:/opt/sonar-scanner/.sonar/cache" \
+        sonarsource/sonar-scanner-cli:latest \
+        -Dsonar.projectKey="$SONAR_PROJECT_KEY" \
+        -Dsonar.projectName="$SONAR_PROJECT_NAME" \
+        -Dsonar.sources=. \
+        -Dsonar.host.url="$SONAR_HOST_URL" \
+        -Dsonar.token="$SONAR_TOKEN" \
+        -Dsonar.java.binaries=. \
+        -Dsonar.exclusions="**/node_modules/**,**/dist/**,**/build/**,**/target/**,**/.gradle/**,**/.m2/**,**/.git/**,**/reports/**"
