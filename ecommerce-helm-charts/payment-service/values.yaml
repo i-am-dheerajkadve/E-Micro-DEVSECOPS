@@ -1,0 +1,30 @@
+replicaCount: 1
+
+namespace: ecommerce-devops
+
+image:
+  repository: dheerajkadve/payment-service
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8085
+  targetPort: 8085
+
+containerPort: 8085
+
+configMapName: ecommerce-config
+secretName: ecommerce-secret
+
+envFromConfigMap:
+  - name: SPRING_PROFILES_ACTIVE
+    key: SPRING_PROFILES_ACTIVE
+
+envFromSecret:
+  []
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

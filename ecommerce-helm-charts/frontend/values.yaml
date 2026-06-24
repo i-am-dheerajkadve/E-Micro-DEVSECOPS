@@ -1,0 +1,29 @@
+replicaCount: 1
+
+namespace: ecommerce-devops
+
+image:
+  repository: dheerajkadve/frontend
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 80
+
+containerPort: 80
+
+configMapName: ecommerce-config
+secretName: ecommerce-secret
+
+envFromConfigMap:
+  []
+
+envFromSecret:
+  []
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
