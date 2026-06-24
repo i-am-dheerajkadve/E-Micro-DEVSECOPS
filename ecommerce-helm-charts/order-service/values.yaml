@@ -1,0 +1,43 @@
+replicaCount: 1
+
+namespace: ecommerce-devops
+
+image:
+  repository: dheerajkadve/order-service
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8084
+  targetPort: 8084
+
+containerPort: 8084
+
+configMapName: ecommerce-config
+secretName: ecommerce-secret
+
+envFromConfigMap:
+  - name: INVENTORY_SERVICE_URL
+    key: INVENTORY_SERVICE_URL
+  - name: PAYMENT_SERVICE_URL
+    key: PAYMENT_SERVICE_URL
+  - name: NOTIFICATION_SERVICE_URL
+    key: NOTIFICATION_SERVICE_URL
+  - name: CART_SERVICE_URL
+    key: CART_SERVICE_URL
+  - name: SPRING_PROFILES_ACTIVE
+    key: SPRING_PROFILES_ACTIVE
+  - name: SPRING_DATASOURCE_URL
+    key: ORDER_DB_URL
+
+envFromSecret:
+  - name: SPRING_DATASOURCE_USERNAME
+    key: POSTGRES_USER
+  - name: SPRING_DATASOURCE_PASSWORD
+    key: POSTGRES_PASSWORD
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,35 @@
+replicaCount: 1
+
+namespace: ecommerce-devops
+
+image:
+  repository: dheerajkadve/user-service
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8081
+  targetPort: 8081
+
+containerPort: 8081
+
+configMapName: ecommerce-config
+secretName: ecommerce-secret
+
+envFromConfigMap:
+  - name: SPRING_PROFILES_ACTIVE
+    key: SPRING_PROFILES_ACTIVE
+  - name: SPRING_DATASOURCE_URL
+    key: USER_DB_URL
+
+envFromSecret:
+  - name: SPRING_DATASOURCE_USERNAME
+    key: POSTGRES_USER
+  - name: SPRING_DATASOURCE_PASSWORD
+    key: POSTGRES_PASSWORD
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
