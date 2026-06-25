@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "app.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ include "app.name" . }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app: {{ include "app.name" . }}
+  ports:
+    - name: http
+      port: {{ .Values.service.ports.http }}
+      targetPort: {{ .Values.containerPorts.http }}
+      protocol: TCP
+    - name: gateway-proxy
+      port: {{ .Values.service.ports.gatewayProxy }}
+      targetPort: {{ .Values.containerPorts.gatewayProxy }}
+      protocol: TCP
