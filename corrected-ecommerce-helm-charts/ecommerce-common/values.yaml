@@ -1,0 +1,32 @@
+namespace:
+  create: true
+  name: ecommerce-devops
+
+config:
+  SPRING_PROFILES_ACTIVE: "docker"
+  USER_SERVICE_URL: "http://user-service:8081"
+  PRODUCT_SERVICE_URL: "http://product-service:8082"
+  CART_SERVICE_URL: "http://cart-service:8083"
+  ORDER_SERVICE_URL: "http://order-service:8084"
+  INVENTORY_SERVICE_URL: "http://inventory-service:8086"
+  PAYMENT_SERVICE_URL: "http://payment-service:8085"
+  NOTIFICATION_SERVICE_URL: "http://notification-service:8087"
+  USER_DB_URL: "jdbc:postgresql://postgres:5432/user_db"
+  PRODUCT_DB_URL: "jdbc:postgresql://postgres:5432/product_db"
+  CART_DB_URL: "jdbc:postgresql://postgres:5432/cart_db"
+  ORDER_DB_URL: "jdbc:postgresql://postgres:5432/order_db"
+  INVENTORY_DB_URL: "jdbc:postgresql://postgres:5432/inventory_db"
+
+secret:
+  POSTGRES_USER: "postgres"
+  POSTGRES_PASSWORD: "postgres"
+  JWT_SECRET: "c2VjcmV0LWtleS1mb3ItZWNvbW1lcmNlLW1pY3Jvc2VydmljZXMtYXBwbGljYXRpb24tMjAyNg=="
+
+postgres:
+  name: postgres
+  image: postgres:15-alpine
+  port: 5432
+  database: postgres
+  storage: 1Gi
+  storageClassName: ""   # keep empty to use the default EKS StorageClass, or set gp2/gp3
+  resources: {}

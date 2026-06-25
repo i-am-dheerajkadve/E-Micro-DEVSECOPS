@@ -1,0 +1,33 @@
+replicaCount: 1
+namespace: ecommerce-devops
+
+image:
+  repository: dheerajkadve/inventory-service
+  tag: latest
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 8086
+  targetPort: 8086
+
+containerPort: 8086
+configMapName: ecommerce-config
+secretName: ecommerce-secret
+
+envFromConfigMap:
+  - name: SPRING_PROFILES_ACTIVE
+    key: SPRING_PROFILES_ACTIVE
+  - name: SPRING_DATASOURCE_URL
+    key: INVENTORY_DB_URL
+
+envFromSecret:
+  - name: SPRING_DATASOURCE_USERNAME
+    key: POSTGRES_USER
+  - name: SPRING_DATASOURCE_PASSWORD
+    key: POSTGRES_PASSWORD
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,28 @@
+replicaCount: 1
+namespace: ecommerce-devops
+
+image:
+  repository: dheerajkadve/notification-service
+  tag: latest
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 8087
+  targetPort: 8087
+
+containerPort: 8087
+configMapName: ecommerce-config
+secretName: ecommerce-secret
+
+envFromConfigMap:
+  - name: SPRING_PROFILES_ACTIVE
+    key: SPRING_PROFILES_ACTIVE
+
+envFromSecret:
+  []
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
