@@ -1,0 +1,345 @@
+pipeline {
+    agent any
+
+    options {
+        skipDefaultCheckout(true)
+    }
+
+    environment {
+        REPO_URL = 'https://github.com/i-am-dheerajkadve/E-Micro-DEVSECOPS.git'
+        SONAR_HOST_URL = 'http://localhost:9000'
+        SONAR_PROJECT_KEY = 'E-Micro-DEVSECOPS'
+        NEXUS_URL = 'http://localhost:8081'
+        NEXUS_REPO = 'devsecops-repository'
+        DOCKERHUB_NAMESPACE = 'dheerajkadve'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        RUN_PIPELINE = 'true'
+    }
+
+    stages {
+        stage('Clone Code') {
+            steps {
+                script {
+                    if (env.BRANCH_NAME) {
+                        checkout scm
+                    } else {
+                        git branch: 'main', url: "${REPO_URL}"
+                    }
+                }
+            }
+        }
+
+        stage('Check Changed Files') {
+            steps {
+                script {
+                    def changedFiles = sh(
+                        script: '''
+                        git diff --name-only HEAD~1 HEAD 2>/dev/null || git show --name-only --pretty="" HEAD
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Changed files:"
+                    echo changedFiles
+
+                    def importantChanges = changedFiles
+                        .split('\n')
+                        .findAll { file ->
+                            file &&
+                            !file.startsWith('corrected-ecommerce-helm-charts/') &&
+                            !file.startsWith('k8s/')
+                        }
+
+                    if (importantChanges.isEmpty()) {
+                        echo "Only corrected-ecommerce-helm-charts/ or k8s/ changed."
+                        echo "Skipping pipeline."
+                        env.RUN_PIPELINE = 'false'
+                        currentBuild.result = 'NOT_BUILT'
+                    } else {
+                        echo "Changes found outside ignored folders."
+                        echo "Running full pipeline."
+                        env.RUN_PIPELINE = 'true'
+                    }
+                }
+            }
+        }
+
+        stage('Start SonarQube and Nexus') {
+            when {
+                expression { env.RUN_PIPELINE == 'true' }
+            }
+            steps {
+                sh '''
+                cd sonar-nexus
+
+                echo "Checking if SonarQube and Nexus are already running..."
+
+                RUNNING_SERVICES=$(docker compose ps --services --filter "status=running" || true)
+
+                echo "Running compose services:"
+                echo "$RUNNING_SERVICES"
+
+                SONAR_RUNNING=$(echo "$RUNNING_SERVICES" | grep -w "sonarqube" || true)
+                NEXUS_RUNNING=$(echo "$RUNNING_SERVICES" | grep -w "nexus" || true)
+
+                if [ -n "$SONAR_RUNNING" ] && [ -n "$NEXUS_RUNNING" ]; then
+                  echo "SonarQube and Nexus are already running."
+                  echo "Skipping docker compose up -d."
+                else
+                  echo "SonarQube or Nexus is not running."
+                  echo "Starting SonarQube and Nexus using docker compose..."
+                  docker compose up -d
+
+                  echo "Waiting for SonarQube and Nexus to become ready..."
+                  sleep 120
+                fi
+
+                echo "Current running Docker containers:"
+                docker ps
+
+                echo "Checking SonarQube status..."
+                curl -f ${SONAR_HOST_URL}/api/system/status || true
+                '''
+            }
+        }
+
+        stage('SonarQube Scan') {
+            when {
+                expression { env.RUN_PIPELINE == 'true' }
+            }
+            steps {
+                withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                    sh '''
+                    mkdir -p reports/sonarqube .scannerwork .sonar/cache
+                    chmod -R 777 reports .scannerwork .sonar || true
+
+                    docker run --rm \
+                      --network host \
+                      -e SONAR_HOST_URL="${SONAR_HOST_URL}" \
+                      -e SONAR_TOKEN="${SONAR_TOKEN}" \
+                      -v "$PWD:/usr/src" \
+                      -v "$PWD/.sonar/cache:/opt/sonar-scanner/.sonar/cache" \
+                      sonarsource/sonar-scanner-cli:latest \
+                      -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
+                      -Dsonar.projectName="${SONAR_PROJECT_KEY}" \
+                      -Dsonar.sources=. \
+                      -Dsonar.host.url="${SONAR_HOST_URL}" \
+                      -Dsonar.token="${SONAR_TOKEN}" \
+                      -Dsonar.java.binaries=. \
+                      -Dsonar.exclusions="**/node_modules/**,**/dist/**,**/build/**,**/target/**,**/.gradle/**,**/.git/**,**/reports/**"
+
+                    cp -r .scannerwork reports/sonarqube/ || true
+                    '''
+                }
+            }
+        }
+
+        stage('Run JUnit Tests') {
+            when {
+                expression { env.RUN_PIPELINE == 'true' }
+            }
+            steps {
+                sh '''
+                mkdir -p reports/junit
+
+                MAVEN_SERVICES="api-gateway user-service order-service inventory-service"
+                GRADLE_SERVICES="product-service cart-service payment-service notification-service"
+
+                for service in $MAVEN_SERVICES; do
+                  echo "Running Maven tests for $service"
+                  cd $service
+                  mvn test || true
+                  cd ..
+
+                  mkdir -p reports/junit/$service
+                  cp -r $service/target/surefire-reports/* reports/junit/$service/ || true
+                done
+
+                for service in $GRADLE_SERVICES; do
+                  echo "Running Gradle tests for $service"
+                  cd $service
+                  chmod +x gradlew || true
+                  ./gradlew test || gradle test || true
+                  cd ..
+
+                  mkdir -p reports/junit/$service
+                  cp -r $service/build/test-results/test/* reports/junit/$service/ || true
+                done
+
+                tar -czf junit-reports.tar.gz reports/junit
+                '''
+            }
+
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: 'reports/junit/**/*.xml'
+                }
+            }
+        }
+
+        stage('Upload JUnit Reports to Nexus') {
+            when {
+                expression { env.RUN_PIPELINE == 'true' }
+            }
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'nexus-creds', usernameVariable: 'NEXUS_USER', passwordVariable: 'NEXUS_PASS')]) {
+                    sh '''
+                    curl -u "$NEXUS_USER:$NEXUS_PASS" \
+                      --upload-file junit-reports.tar.gz \
+                      "${NEXUS_URL}/repository/${NEXUS_REPO}/junit/junit-reports-${BUILD_NUMBER}.tar.gz"
+                    '''
+                }
+            }
+        }
+
+        stage('Upload Sonar Report to Nexus') {
+            when {
+                expression { env.RUN_PIPELINE == 'true' }
+            }
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'nexus-creds', usernameVariable: 'NEXUS_USER', passwordVariable: 'NEXUS_PASS')]) {
+                    sh '''
+                    tar -czf sonarqube-report.tar.gz reports/sonarqube
+
+                    curl -u "$NEXUS_USER:$NEXUS_PASS" \
+                      --upload-file sonarqube-report.tar.gz \
+                      "${NEXUS_URL}/repository/${NEXUS_REPO}/sonarqube/sonarqube-report-${BUILD_NUMBER}.tar.gz"
+                    '''
+                }
+            }
+        }
+
+        stage('Build Docker Images') {
+            when {
+                expression { env.RUN_PIPELINE == 'true' }
+            }
+            steps {
+                sh '''
+                services="api-gateway user-service product-service cart-service order-service payment-service inventory-service notification-service frontend"
+
+                for service in $services; do
+                  echo "Building image for $service"
+                  docker build -t ${DOCKERHUB_NAMESPACE}/$service:${IMAGE_TAG} ./$service
+                  docker tag ${DOCKERHUB_NAMESPACE}/$service:${IMAGE_TAG} ${DOCKERHUB_NAMESPACE}/$service:latest
+                done
+                '''
+            }
+        }
+
+        stage('Trivy Scan Images') {
+            when {
+                expression { env.RUN_PIPELINE == 'true' }
+            }
+            steps {
+                sh '''
+                mkdir -p reports/trivy
+                services="api-gateway user-service product-service cart-service order-service payment-service inventory-service notification-service frontend"
+
+                for service in $services; do
+                  trivy image \
+                    --format table \
+                    --output reports/trivy/$service-trivy-report.txt \
+                    ${DOCKERHUB_NAMESPACE}/$service:${IMAGE_TAG} || true
+                done
+
+                tar -czf trivy-reports.tar.gz reports/trivy
+                '''
+            }
+        }
+
+        stage('Upload Trivy Reports to Nexus') {
+            when {
+                expression { env.RUN_PIPELINE == 'true' }
+            }
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'nexus-creds', usernameVariable: 'NEXUS_USER', passwordVariable: 'NEXUS_PASS')]) {
+                    sh '''
+                    curl -u "$NEXUS_USER:$NEXUS_PASS" \
+                      --upload-file trivy-reports.tar.gz \
+                      "${NEXUS_URL}/repository/${NEXUS_REPO}/trivy/trivy-reports-${BUILD_NUMBER}.tar.gz"
+                    '''
+                }
+            }
+        }
+
+        stage('Push Images to Docker Hub') {
+            when {
+                expression { env.RUN_PIPELINE == 'true' }
+            }
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh '''
+                    echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+
+                    services="api-gateway user-service product-service cart-service order-service payment-service inventory-service notification-service frontend"
+
+                    for service in $services; do
+                      docker push ${DOCKERHUB_NAMESPACE}/$service:${IMAGE_TAG}
+                      docker push ${DOCKERHUB_NAMESPACE}/$service:latest
+                    done
+                    '''
+                }
+            }
+        }
+
+        stage('Update Helm Image Tags in GitHub') {
+            when {
+                expression { env.RUN_PIPELINE == 'true' }
+            }
+
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'github-creds', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_TOKEN')]) {
+                    sh '''
+                    set -e
+
+                    CHART_DIR="corrected-ecommerce-helm-charts"
+                    TARGET_BRANCH="${BRANCH_NAME:-main}"
+
+                    if [ -n "$CHANGE_BRANCH" ]; then
+                      TARGET_BRANCH="$CHANGE_BRANCH"
+                    fi
+
+                    echo "Updating Helm image tags to: ${IMAGE_TAG}"
+                    echo "Target branch: ${TARGET_BRANCH}"
+
+                    if [ ! -d "$CHART_DIR" ]; then
+                      echo "ERROR: $CHART_DIR folder not found"
+                      exit 1
+                    fi
+
+                    echo "Updating tag field inside values.yaml files..."
+
+                    find "$CHART_DIR" -type f \\( -name "values.yaml" -o -name "values.yml" \\) \
+                      -exec sed -i -E "s#^([[:space:]]*tag:[[:space:]]*).*#\\1\\"${IMAGE_TAG}\\"#g" {} \\;
+
+                    echo "Updating hardcoded Docker image tags also, if present..."
+
+                    services="api-gateway user-service product-service cart-service order-service payment-service inventory-service notification-service frontend"
+
+                    for service in $services; do
+                      find "$CHART_DIR" -type f \\( -name "*.yaml" -o -name "*.yml" \\) \
+                        -exec sed -i -E "s#(${DOCKERHUB_NAMESPACE}/${service}:)[A-Za-z0-9._-]+#\\1${IMAGE_TAG}#g" {} \\;
+                    done
+
+                    echo "Checking Git changes..."
+                    git status --short "$CHART_DIR"
+
+                    if git diff --quiet -- "$CHART_DIR"; then
+                      echo "No Helm image tag changes found. Nothing to commit."
+                    else
+                      git config user.email "jenkins@example.com"
+                      git config user.name "jenkins-ci"
+
+                      git add "$CHART_DIR"
+                      git commit -m "Update Helm image tags to build ${IMAGE_TAG} [skip ci]"
+
+                      git push "https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/i-am-dheerajkadve/E-Micro-DEVSECOPS.git" HEAD:${TARGET_BRANCH}
+
+                      echo "Helm chart image tags updated and pushed successfully."
+                    fi
+                    '''
+                }
+            }
+        }
+    }
+}
