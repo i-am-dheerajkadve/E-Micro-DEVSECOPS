@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: jfrog-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: artifactory
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: artifactorydb
+    volumes:
+      - /opt/jfrog/postgres:/var/lib/postgresql/data
+    networks:
+      - jfrog-net
+
+  artifactory:
+    image: releases-docker.jfrog.io/jfrog/artifactory-oss:latest
+    container_name: jfrog-artifactory
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    ports:
+      - "8081:8081"
+      - "8082:8082"
+    volumes:
+      - /opt/jfrog/artifactory/var:/var/opt/jfrog/artifactory
+    networks:
+      - jfrog-net
+
+networks:
+  jfrog-net:
+    driver: bridge
