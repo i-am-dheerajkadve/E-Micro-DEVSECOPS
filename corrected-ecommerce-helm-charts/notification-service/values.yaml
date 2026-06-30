@@ -3,7 +3,7 @@ namespace: ecommerce-devops
 
 image:
   repository: dheerajkadve/notification-service
-  tag: "12"
+  tag: "13"
   pullPolicy: Always
 
 service:
