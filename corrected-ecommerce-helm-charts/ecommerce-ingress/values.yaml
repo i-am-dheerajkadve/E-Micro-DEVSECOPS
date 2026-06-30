@@ -1,0 +1,34 @@
+namespace: ecommerce-devops
+
+ingress:
+  enabled: true
+
+  # For nginx ingress controller
+  className: nginx
+
+  # Keep empty if you want to access using LoadBalancer IP directly.
+  # Example with domain: ecommerce.dheeraj.local
+  host: ""
+
+  annotations: {}
+    # nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+
+  tls: []
+  # Example:
+  # tls:
+  #   - secretName: ecommerce-tls
+  #     hosts:
+  #       - ecommerce.dheeraj.local
+
+  services:
+    frontend:
+      name: frontend
+      port: 80
+
+    apiGateway:
+      name: api-gateway
+      port: 8080
+
+  paths:
+    frontend: /
+    api: /api
