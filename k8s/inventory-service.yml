@@ -12,10 +12,14 @@ spec:
     metadata:
       labels:
         app: inventory-service
+      annotations:
+        instrumentation.opentelemetry.io/inject-java: "true"
+        resource.opentelemetry.io/service.name: "api-gateway"
+        resource.opentelemetry.io/service.namespace: "ecommerce"
     spec:
       containers:
         - name: inventory-service
-          image: inventory-service:latest
+          image: dheerajkadve/inventory-service:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8086
