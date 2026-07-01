@@ -12,10 +12,14 @@ spec:
     metadata:
       labels:
         app: product-service
+      annotations:
+        instrumentation.opentelemetry.io/inject-java: "true"
+        resource.opentelemetry.io/service.name: "api-gateway"
+        resource.opentelemetry.io/service.namespace: "ecommerce"
     spec:
       containers:
         - name: product-service
-          image: product-service:latest
+          image: dheerajkadve/product-service:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8082
