@@ -3,7 +3,7 @@ namespace: ecommerce-devops
 
 image:
   repository: dheerajkadve/payment-service
-  tag: "13"
+  tag: "14"
   pullPolicy: Always
 
 service:
