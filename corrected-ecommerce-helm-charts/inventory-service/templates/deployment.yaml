@@ -1,3 +1,4 @@
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,6 +15,9 @@ spec:
     metadata:
       labels:
         app: {{ include "app.name" . }}
+             {{- with .Values.podLabels }}
+             {{- toYaml . | nindent 8 }}
+             {{- end }}
     spec:
       containers:
         - name: {{ include "app.name" . }}
@@ -59,3 +63,4 @@ spec:
       tolerations:
 {{- toYaml . | nindent 8 }}
 {{- end }}
+

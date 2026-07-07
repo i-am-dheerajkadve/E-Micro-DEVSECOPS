@@ -1,9 +1,10 @@
+
 replicaCount: 1
 namespace: ecommerce-devops
 
 image:
   repository: dheerajkadve/user-service
-  tag: "14"
+  tag: "13"
   pullPolicy: Always
 
 service:
@@ -33,3 +34,7 @@ resources: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+podLabels:
+  newrelic-apm: java
+
