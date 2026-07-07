@@ -1,0 +1,36 @@
+apiVersion: newrelic.com/v1beta2
+kind: Instrumentation
+metadata:
+  name: newrelic-java-apm
+  namespace: newrelic
+spec:
+  licenseKeySecret: newrelic-key-secret
+
+  agent:
+    language: java
+    image: newrelic/newrelic-java-init:latest
+    env:
+      - name: NEW_RELIC_APP_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.labels['app']
+
+      - name: NEW_RELIC_DISTRIBUTED_TRACING_ENABLED
+        value: "true"
+
+      - name: NEW_RELIC_LOG_LEVEL
+        value: "info"
+
+      - name: NEW_RELIC_LABELS
+        value: "environment:dev;cluster:aks-ecommerce;namespace:ecommerce-devops"
+
+  podLabelSelector:
+    matchLabels:
+      newrelic-apm: java
+
+  namespaceLabelSelector:
+    matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: In
+        values:
+          - ecommerce-devops
