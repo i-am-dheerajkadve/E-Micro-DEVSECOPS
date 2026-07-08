@@ -4,7 +4,7 @@ metadata:
   name: newrelic-java-apm
   namespace: newrelic
 spec:
-  licenseKeySecret: newrelic-key-secret
+  licenseKeySecret: YOUR_NEW_RELIC_INGEST_LICENSE_KEY
 
   agent:
     language: java
